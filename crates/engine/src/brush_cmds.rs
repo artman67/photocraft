@@ -277,7 +277,17 @@ fn stroke_with(s: &mut Session, cmd: &str, p: &Value, label: &str, brush: BrushS
         s.edit(label, |doc, _| {
             if let Some(l) = live {
                 let (surf, _) = crate::channel_cmds::target_surface(doc, id, p)?;
-                *surf = l.surface;
+                // Take the stroke's **tiles**, not the whole surface. A lazily-read layer holds only
+                // the tiles it has decoded so far, so installing the preview surface wholesale would
+                // drop every tile outside the area the stroke could see — and a missing tile reads as
+                // the default pixel, which is how the file's pixels would silently disappear. Tiles
+                // the stroke did not touch are still shared with the document (`Arc::ptr_eq`), so for
+                // a fully-resident layer this copies exactly what the old `*surf = l.surface` moved.
+                for (coord, tile) in l.surface.tiles() {
+                    if !surf.tile(*coord).is_some_and(|t| std::sync::Arc::ptr_eq(t, tile)) {
+                        *surf.tile_mut(*coord) = (**tile).clone();
+                    }
+                }
                 return Ok(l.bounds);
             }
             let sel = doc.selection.clone();

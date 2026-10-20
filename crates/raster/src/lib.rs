@@ -41,7 +41,24 @@ pub struct Tile {
     data: Box<[u8]>,
 }
 
+/// Pixels a [`Surface`] can pull tiles from on demand: today a PSD file (C1), later a `.pcraft`
+/// bundle or any tile store with an index.
+///
+/// Returns **encoded bytes** for one tile in the surface's format (`TILE_SIZE² × bytes_per_pixel`,
+/// row-major, interleaved), or `None` where the source has no pixels. Bytes rather than a `Tile` so
+/// the source never needs to know how tiles are stored — and so a decoder can fill a buffer it
+/// already owns.
+pub trait TileSource {
+    fn tile_bytes(&self, coord: TileCoord, format: PixelFormat) -> Option<Vec<u8>>;
+}
+
 impl Tile {
+    /// A tile from encoded bytes; `None` when the length is not exactly `TILE_SIZE² × bytes_per_pixel`.
+    pub fn from_bytes(format: PixelFormat, bytes: Vec<u8>) -> Option<Self> {
+        let expected = (TILE_SIZE as usize * TILE_SIZE as usize).checked_mul(format.bytes_per_pixel())?;
+        (bytes.len() == expected).then(|| Tile { data: bytes.into_boxed_slice() })
+    }
+
     fn try_filled(format: &PixelFormat, pixel: &[u8]) -> Result<Self, AllocationError> {
         let n = (TILE_SIZE * TILE_SIZE) as usize;
         let bytes = n.checked_mul(format.bytes_per_pixel()).ok_or(AllocationError::SizeOverflow)?;
@@ -235,8 +252,66 @@ impl Surface {
     pub fn tile(&self, c: TileCoord) -> Option<&Arc<Tile>> {
         self.tiles.get(&c)
     }
+
+    /// Whether this surface is holding a tile at `c` (as opposed to reading as its default pixel).
+    pub fn has_tile(&self, c: TileCoord) -> bool {
+        self.tiles.contains_key(&c)
+    }
+
+    /// Pull the tiles covering `r` out of `source`, for any that are not resident yet.
+    ///
+    /// This is the seam for lazily-read documents (C1): a surface that starts empty and asks its
+    /// source for a tile only when something actually reads that area. Deliberately explicit rather
+    /// than hidden inside `tile()` — materialising has a cost and a budget, and the caller (the
+    /// compositor, or the shell before a frame) is the only thing that knows how much it can afford.
+    ///
+    /// Tiles the source has no pixels for stay absent, which already means "reads as the default
+    /// pixel" everywhere in this type. Returns how many were loaded.
+    pub fn ensure_tiles(&mut self, r: Rect, source: &dyn TileSource) -> usize {
+        let format = self.format;
+        let mut loaded = 0;
+        for coord in r.tiles() {
+            if self.tiles.contains_key(&coord) {
+                continue;
+            }
+            let Some(bytes) = source.tile_bytes(coord, format) else { continue };
+            let Some(tile) = Tile::from_bytes(format, bytes) else { continue };
+            self.tiles.insert(coord, Arc::new(tile));
+            loaded += 1;
+        }
+        loaded
+    }
     pub fn default_pixel(&self) -> Vec<f32> {
         decode_pixel(&self.format, &self.default_pixel)
+    }
+
+    /// Remove the tiles covering `r` and hand them back, newest owner takes over.
+    ///
+    /// This is the memory half of a scratch store: the caller decides what to do with what it gets
+    /// (write painted tiles to disk, drop clean ones), and the surface simply stops holding them.
+    /// Reading the area afterwards behaves like a fresh lazily-read surface — absent tiles read as
+    /// the default pixel until something calls [`ensure_tiles`] for them.
+    pub fn evict(&mut self, r: Rect) -> Vec<(TileCoord, Arc<Tile>)> {
+        let mut released = Vec::new();
+        for coord in r.tiles() {
+            if let Some(tile) = self.tiles.remove(&coord) {
+                released.push((coord, tile));
+            }
+        }
+        released
+    }
+
+    /// Install a tile decoded elsewhere (a background worker), without copying its bytes.
+    ///
+    /// Returns `false` when the coordinate is already resident — the common case for a result that
+    /// arrived after the same tile was pulled synchronously, and not an error: the resident tile is
+    /// the same pixels.
+    pub fn insert_tile(&mut self, coord: TileCoord, tile: Tile) -> bool {
+        if self.tiles.contains_key(&coord) {
+            return false;
+        }
+        self.tiles.insert(coord, Arc::new(tile));
+        true
     }
 
     /// Mutable access to a tile, allocating it (filled with the default pixel) or un-sharing it.
@@ -1098,6 +1173,74 @@ impl Rgba8Image {
 /// Is this sample type able to hold values above 1.0 (HDR)?
 pub fn is_hdr(sample: SampleType) -> bool {
     matches!(sample, SampleType::F32)
+}
+
+#[cfg(test)]
+mod lazy_tiles {
+    use super::*;
+
+    /// Every tile is one opaque red pixel, encoded as the surface asks.
+    struct RedTiles;
+
+    impl TileSource for RedTiles {
+        fn tile_bytes(&self, _coord: TileCoord, format: PixelFormat) -> Option<Vec<u8>> {
+            let bpp = format.bytes_per_pixel();
+            let mut bytes = vec![0u8; TILE_SIZE as usize * TILE_SIZE as usize * bpp];
+            for px in bytes.chunks_exact_mut(bpp) {
+                px[0] = 255;
+                if bpp > 1 {
+                    px[bpp - 1] = 255;
+                }
+            }
+            Some(bytes)
+        }
+    }
+
+    #[test]
+    fn evicting_hands_the_tiles_back_and_leaves_the_area_absent() {
+        let mut surface = Surface::new(PixelFormat::RGBA8);
+        surface.fill_rect(Rect::new(0, 0, 512, 512), &[0.9, 0.5, 0.2, 1.0]);
+        assert!(surface.has_tile(TileCoord::new(0, 0)));
+        assert!(surface.has_tile(TileCoord::new(1, 0)));
+
+        let released = surface.evict(Rect::new(0, 0, 256, 256));
+        assert_eq!(released.len(), 1, "one tile covers a 256² rect");
+        assert_eq!(released[0].0, TileCoord::new(0, 0));
+        assert!(!surface.has_tile(TileCoord::new(0, 0)), "evicted, not just reported");
+        // Outside the rect nothing was touched — the caller keeps what it did not ask to drop.
+        assert!(surface.has_tile(TileCoord::new(1, 0)));
+    }
+
+    #[test]
+    fn tiles_are_pulled_on_demand_and_only_once() {
+        let mut surface = Surface::new(PixelFormat::RGBA8);
+        let one_tile = Rect::from_xywh(0, 0, TILE_SIZE as u32, TILE_SIZE as u32);
+        assert_eq!(surface.tile_count(), 0, "a lazy surface starts empty");
+
+        assert_eq!(surface.ensure_tiles(one_tile, &RedTiles), 1);
+        assert_eq!(surface.tile_count(), 1);
+
+        // The pixels really are there: the first sample is red and opaque.
+        let px = surface.read_region(Rect::from_xywh(0, 0, 1, 1));
+        assert_eq!(px, vec![1.0, 0.0, 0.0, 1.0]);
+
+        // A second pass loads nothing (that is what keeps a frame cheap after the first one).
+        assert_eq!(surface.ensure_tiles(one_tile, &RedTiles), 0);
+    }
+
+    #[test]
+    fn a_source_without_pixels_leaves_the_default() {
+        struct Empty;
+        impl TileSource for Empty {
+            fn tile_bytes(&self, _coord: TileCoord, _format: PixelFormat) -> Option<Vec<u8>> {
+                None
+            }
+        }
+        let mut surface = Surface::new(PixelFormat::RGBA8);
+        assert_eq!(surface.ensure_tiles(Rect::from_xywh(0, 0, 512, 512), &Empty), 0);
+        assert_eq!(surface.tile_count(), 0);
+        assert_eq!(surface.read_region(Rect::from_xywh(0, 0, 1, 1)), vec![0.0; 4]);
+    }
 }
 
 #[cfg(test)]
