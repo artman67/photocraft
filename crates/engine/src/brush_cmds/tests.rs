@@ -32,6 +32,52 @@ fn stroke_backwards_compatible() {
 }
 
 #[test]
+fn live_stroke_keeps_the_stroke_opacity_on_commit() {
+    // A live stroke (begin/push/commit) must keep the stroke opacity at commit time: losing it
+    // paints a 10% stroke with full ink.
+    let pts = [[10.0, 20.0, 1.0], [40.0, 20.0, 1.0], [70.0, 20.0, 1.0]];
+    let base = json!({"size": 6, "hardness": 1, "flow": 1, "opacity": 0.35, "color": "#0000ff"});
+    let mut s = session(80, 40);
+    let (live, p) = live_and_commit(&s, "paint.stroke", base, &pts);
+    s.offer_live_stroke(live).unwrap();
+    s.execute("paint.stroke", p).unwrap();
+    s.clear_live_stroke();
+    let a = rgba(&s, 40, 20)[3];
+    assert!((a - 0.35).abs() < 0.02, "live commit keeps alpha 0.35 at the stroke centre, got {a}");
+}
+
+#[test]
+fn stroke_opacity_on_an_8bit_white_doc_layers_the_ink() {
+    // The same contract on an 8-bit document over white paper: 10% ink must still read as light.
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 80, "height": 40, "depth": 8, "background": "white"})).unwrap();
+    s.execute(
+        "paint.stroke",
+        json!({"points": [[4, 20], [76, 20]], "size": 6, "hardness": 1, "flow": 1,
+               "opacity": 0.1, "color": "#20303f"}),
+    )
+    .unwrap();
+    let px = rgba(&s, 40, 20);
+    assert!(px[0] > 0.8, "10% ink over white paper stays light (R>0.8), got {px:?}");
+}
+
+#[test]
+fn stroke_opacity_is_a_stroke_level_ceiling() {
+    // A stroke opacity of 0.35 must reach the pixel as alpha 0.35, not 1.0. Measured on a
+    // transparent target: the alpha channel is the cleanest place to see it (an 8-bit sRGB
+    // composite hides ~8 levels of error behind dithering).
+    let mut s = session(80, 40);
+    s.execute(
+        "paint.stroke",
+        json!({"points": [[4, 20], [76, 20]], "size": 6, "hardness": 1, "flow": 1,
+               "opacity": 0.35, "color": "#0000ff"}),
+    )
+    .unwrap();
+    let a = rgba(&s, 40, 20)[3];
+    assert!((a - 0.35).abs() < 0.02, "stroke opacity 0.35 → alpha 0.35 at the stroke centre, got {a}");
+}
+
+#[test]
 fn stroke_accepts_full_points_brush_and_preset() {
     let mut s = session(200, 100);
     // 7-tuples plus a brush object with tilt-driven angle on a flat tip.
@@ -907,6 +953,36 @@ fn a_commit_takes_the_live_strokes_pixels_and_they_equal_a_fresh_render() {
         s.undo();
         assert!(same_pixels(&surface(&s), &surface(&session(200, 100)), Rect::new(0, 0, 200, 100)));
     }
+}
+
+/// A lazily-read layer holds only the tiles it has decoded so far. The commit must therefore
+/// install the stroke's *tiles*, not swap in the whole preview surface: the wholesale swap dropped
+/// every tile the preview never materialised, and a missing tile reads as the default pixel — the
+/// file's pixels would silently disappear.
+#[test]
+fn a_commit_keeps_the_tiles_the_live_surface_never_materialised() {
+    let mut s = session(768, 768);
+    // Exactly tile (2, 2): the area this stroke cannot see, painted before the stroke begins.
+    let far = Rect::from_xywh(512, 512, 256, 256);
+    s.execute("paint.stroke", json!({"points": [[600, 600], [600, 640]], "brush": {"size": 40, "hardness": 1.0}, "color": "#00ff00", "smoothing": 0})).unwrap();
+    let corner = photocraft_geom::TileCoord::new(2, 2);
+    assert!(surface(&s).has_tile(corner), "the painted corner is resident");
+    let before = surface(&s).read_region(far);
+
+    let pts = [[10.0, 10.0, 1.0], [80.0, 40.0, 1.0]];
+    let base = json!({"brush": {"size": 12}, "smoothing": 0.0, "target": "pixels"});
+    let (live, p) = live_and_commit(&s, "paint.stroke", base, &pts);
+    s.offer_live_stroke(live).unwrap();
+    // What a lazily-read layer looks like at pen-up: the offer holds only the area the preview drew.
+    let dropped = s.live_commit.as_mut().unwrap().surface.evict(far);
+    assert_eq!(dropped.len(), 1, "the far corner is one 256² tile");
+
+    let r = s.execute("paint.stroke", p).unwrap();
+    assert_eq!(r["fromLive"], true, "the commit still took the preview's pixels");
+    assert!(surface(&s).has_tile(corner), "a tile the stroke never touched is still resident");
+    assert_eq!(surface(&s).read_region(far), before, "and it still holds the file's pixels, not the default");
+    // The stroke itself landed.
+    assert!(rgba(&s, 40, 25)[3] > 0.9, "the stroke wrote its own pixels");
 }
 
 #[test]
