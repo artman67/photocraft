@@ -380,7 +380,9 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     widgets::hairline(ui);
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(STRIP.0 as f32, STRIP.1 as f32), Sense::hover());
+        // Narrower in a narrow dock column, so the buttons beside it stay visible.
+        let w = (ui.available_width() - 36.0).clamp(120.0, STRIP.0 as f32);
+        let (r, _) = ui.allocate_exact_size(vec2(w, STRIP.1 as f32), Sense::hover());
         ui.painter().rect_filled(r, t.radius_sm, t.field);
         let tex = brush_preview::stroke_texture(ui.ctx(), "settings-strip", &b, STRIP.0, STRIP.1, t.text);
         ui.painter().image(tex.id(), r, full_uv(), Color32::WHITE);

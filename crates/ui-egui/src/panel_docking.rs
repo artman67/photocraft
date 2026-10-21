@@ -933,6 +933,8 @@ pub(crate) fn commit_legacy_update(app: &mut PhotocraftApp, update: LegacyUpdate
     }
     app.ui.docking = Some(update.layout);
     app.ui.docking_hidden = update.hidden;
+    // Free panels the request opened are not in the staged layout; add them before syncing.
+    reconcile(app);
     sync_visibility(app);
     for group in Group::ALL {
         if request.get("dockTabs").and_then(|p| p.get(group.key())).is_some()

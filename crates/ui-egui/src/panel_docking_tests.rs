@@ -556,6 +556,18 @@ fn legacy_control_updates_authoritative_custom_visibility_and_selection_atomical
 }
 
 #[test]
+fn ui_set_opens_a_free_panel_with_or_without_a_theme_change() {
+    for request in [json!({"panels":{"brush_settings":true}}), json!({"panels":{"brush_settings":true},"theme":"studio"})] {
+        let mut app = app();
+        app.ui.theme = crate::theme::ThemeKind::ProMedium;
+        app.run("window.panel.float", json!({"panel":"properties"})).unwrap();
+        assert_eq!(control_set(&mut app, &egui::Context::default(), request.clone())["ok"], true, "{request}");
+        assert!(app.ui.panels.brush_settings, "{request}");
+        assert!(app.ui.docking.as_ref().unwrap().contains(&"brushSettings".into()), "{request}");
+    }
+}
+
+#[test]
 fn legacy_dock_width_is_consumed_by_custom_renderer_and_clamped_to_existing_range() {
     let mut app = app();
     app.run("window.panel.float", json!({"panel":"properties"})).unwrap();
