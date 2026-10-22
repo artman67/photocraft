@@ -64,7 +64,8 @@ fn every_new_preset_button_opens_the_dialog_and_cancel_saves_nothing() {
     h.run_steps(3);
     cancel(&mut h);
     h.state_mut().run("window.panel.float", json!({"panel": "brushes", "x": 20, "y": 20, "width": 560, "height": 860})).unwrap();
-    h.run_steps(3);
+    // The window grows by the preview-size slider row over several frames; wait for it to settle.
+    h.run_steps(8);
     h.get_by_label("Create new brush from the current settings").click();
     h.run_steps(3);
     cancel(&mut h);

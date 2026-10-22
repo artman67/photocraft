@@ -544,7 +544,8 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
     };
     // A docked panel that needs more room than the column has (Brush Settings) widens it, as in
     // Photoshop; the column can narrow again once the panel leaves.
-    let (narrowest, widest) = (*crate::panels::DOCK_WIDTH.start(), *crate::panels::DOCK_WIDTH.end());
+    let range = crate::panels::dock_width_range(ui.ctx().content_rect().width());
+    let (narrowest, widest) = (*range.start(), *range.end());
     let docked = Layout { root: layout.root.clone(), floating: Vec::new() };
     let min_width = docked.panels().into_iter().filter_map(|id| free(id)).map(|p| p.min_width + 16.0).fold(narrowest, f32::max).min(widest);
     let output = if layout.root.is_some() {
@@ -972,7 +973,7 @@ fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui, panel: &str) {
             crate::brush_panel::panel_menu(app, ui);
             ui.separator();
         }
-        "actions" => {
+        "actions" | "Actions" => {
             crate::actions::panel_menu(app, ui);
             ui.separator();
         }
