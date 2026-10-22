@@ -676,6 +676,10 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
 
                 let bridge_pro = matches!(theme.unwrap_or(app.ui.theme), crate::theme::ThemeKind::Pro | crate::theme::ThemeKind::ProMedium);
                 let legacy_update = crate::panel_docking::prepare_legacy_update(app, p, panels.as_ref(), dock_tabs.as_ref(), dock.as_ref(), bridge_pro)?;
+                // The old Brushes tab opens the Brushes panel below, which an invalid saved layout refuses.
+                if brush_tab.is_some_and(|i| i >= 1) && app.ui.docking.as_ref().is_some_and(|l| !crate::panel_docking::valid(l)) {
+                    return Err("invalid panel layout; reset the workspace first".into());
+                }
 
                 // Apply (nothing below can fail).
                 if let Some(stroke) = shape_stroke {

@@ -854,6 +854,19 @@ fn the_old_brushes_tab_request_shows_the_brushes_panel() {
     assert!(app.ui.docking.as_ref().unwrap().contains(&"brushes".into()));
 }
 
+/// An old Brushes tab request that the saved layout can't show changes nothing else either.
+#[test]
+fn an_unshowable_brushes_tab_request_changes_nothing() {
+    let mut app = app();
+    let ctx = egui::Context::default();
+    app.run("window.panel.activate", json!({"panel":"layers"})).unwrap();
+    let layout = serde_json::to_string(app.ui.docking.as_ref().unwrap()).unwrap().replace("\"layers\"", "\"nope\"");
+    app.ui.docking = Some(serde_json::from_str(&layout).unwrap());
+    let section = app.ui.brush_section;
+    assert_ne!(control_set(&mut app, &ctx, json!({"brushSection": section + 1, "brushTab": 1}))["ok"], true);
+    assert_eq!(app.ui.brush_section, section);
+}
+
 /// Docking Brush Settings widens the column to fit it, as in Photoshop; it can narrow again once
 /// the panel leaves.
 #[test]
