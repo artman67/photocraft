@@ -93,10 +93,13 @@ pub struct ListLayout {
     /// the bottom (or, with only the tip and the name on, in the stroke's cell). Replaces the
     /// list/grid choice in the picker.
     pub cards: bool,
+    /// The list takes all of `max_height` however few rows it shows (a dock panel's list, down
+    /// to its footer); off, it shrinks to its rows.
+    pub fill: bool,
 }
 
 /// The Brushes tab's list. [`show`] sets its height.
-pub const PANEL_LIST: ListLayout = ListLayout { id: "brush-presets", max_height: 400.0, cell: 52.0, indent: 20.0, cards: false };
+pub const PANEL_LIST: ListLayout = ListLayout { id: "brush-presets", max_height: 400.0, cell: 52.0, indent: 20.0, cards: false, fill: false };
 /// In a dock panel the Brushes tab's list never gets shorter than this; a shorter panel scrolls
 /// as a whole.
 const MIN_LIST_H: f32 = 120.0;
@@ -353,14 +356,16 @@ pub(crate) fn grid_cell_width(cell: f32, scale: f32) -> f32 {
 }
 
 /// The narrowest a list row gets at preview scale 1 before rows share the width in columns: a
-/// smaller preview makes it narrower, so more columns fit (Photoshop's list view).
+/// smaller preview makes it narrower, so more columns fit (Photoshop's list view). The standard
+/// and larger previews keep one row per line.
 const LIST_ROW_W: f32 = 300.0;
 
 /// The list's columns in a list `width` points wide, `indent` past its left edge, at preview
-/// `scale`: how many [`LIST_ROW_W`]-wide rows fit side by side (one at least), and the width
-/// each gets of the room past the indent.
+/// `scale`: how many [`LIST_ROW_W`]-wide rows fit side by side (one at least, and only one below
+/// a smaller preview), and the width each gets of the room past the indent.
 pub(crate) fn list_columns(width: f32, indent: f32, scale: f32) -> (f32, usize) {
-    let (_, cols) = grid_columns(width, LIST_ROW_W * list_row_height(scale) / 44.0, indent, GRID_GAP);
+    let (_, fit) = grid_columns(width, LIST_ROW_W * list_row_height(scale) / 44.0, indent, GRID_GAP);
+    let cols = if scale < 1.0 { fit } else { 1 };
     let room = if width.is_finite() { (width - indent).max(0.0) } else { 0.0 };
     (((room - GRID_GAP * (cols - 1) as f32) / cols as f32).floor(), cols)
 }
@@ -948,7 +953,7 @@ pub fn preset_list(ui: &mut egui::Ui, presets: &[BrushPreset], current: Option<&
     let grid = st.view == BrushesView::Grid;
     let show = (st.show_name, st.show_stroke, st.show_tip);
     let collapsed = &st.collapsed;
-    egui::ScrollArea::vertical().id_salt(layout.id).max_height(layout.max_height).auto_shrink([false, true]).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt(layout.id).max_height(layout.max_height).auto_shrink([false, !layout.fill]).show(ui, |ui| {
         // A preset, group or folder dragged to the list's top or bottom edge (or past it) scrolls
         // the list, as the Layers panel's rows do, so it can be dropped on rows out of view (#5741).
         let dragging = egui::DragAndDrop::has_payload_of_type::<BrushDrag>(ui.ctx()) && ui.input(|i| i.pointer.primary_down());
@@ -1088,15 +1093,12 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, fill: bool) {
     // and button row. A short panel keeps a few rows and scrolls as a whole.
     let footer = 4.0 + 1.0 + ui.spacing().item_spacing.y + 4.0 + 24.0;
     let layout = if fill {
-        ListLayout { max_height: (ui.available_height() - ui.spacing().item_spacing.y - footer).max(MIN_LIST_H), ..PANEL_LIST }
+        ListLayout { max_height: (ui.available_height() - ui.spacing().item_spacing.y - footer).max(MIN_LIST_H), fill: true, ..PANEL_LIST }
     } else {
         responsive_list_layout(ui)
     };
     let acts = preset_list(ui, &app.session.tools.presets, app.session.tools.current_preset.as_deref(), &mut app.ui.brushes_panel, layout);
     apply(app, acts);
-    if fill {
-        ui.add_space((ui.available_height() - footer).max(0.0));
-    }
     ui.add_space(4.0);
     widgets::hairline(ui);
     ui.add_space(4.0);

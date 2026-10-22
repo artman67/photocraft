@@ -438,9 +438,10 @@ fn preview_scale_is_clamped_to_its_range() {
 
 #[test]
 fn list_rows_flow_into_columns_only_at_small_previews() {
-    // The standard size keeps one column in a docked or a wide floating panel.
-    assert_eq!(list_columns(280.0, 0.0, 1.0).1, 1);
-    assert_eq!(list_columns(560.0, 0.0, 1.0).1, 1);
+    // The standard size and larger keep one column, however wide the panel.
+    for (w, scale) in [(280.0, 1.0), (560.0, 1.0), (1200.0, 1.0), (1200.0, 2.0)] {
+        assert_eq!(list_columns(w, 0.0, scale), (w, 1), "{w} at {scale}");
+    }
     // Small previews share the width; each column takes its share of the room past the indent.
     assert_eq!(list_columns(400.0, 0.0, 0.6), (198.0, 2));
     assert_eq!(list_columns(700.0, 16.0, 0.5).1, 4);
