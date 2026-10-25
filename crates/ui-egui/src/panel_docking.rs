@@ -965,6 +965,10 @@ fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui, panel: &str) {
             crate::swatches_ui::panel_menu(app, ui);
             ui.separator();
         }
+        "color" => {
+            crate::color_panel_ui::panel_menu(app, ui);
+            ui.separator();
+        }
         "history" => {
             crate::history_menu_ui::panel_menu(app, ui);
             ui.separator();
@@ -975,6 +979,10 @@ fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui, panel: &str) {
         }
         "actions" | "Actions" => {
             crate::actions::panel_menu(app, ui);
+            ui.separator();
+        }
+        "styles" => {
+            crate::preset_panels::styles_menu(app, ui);
             ui.separator();
         }
         _ => {}
