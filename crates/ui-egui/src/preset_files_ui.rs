@@ -52,7 +52,7 @@ pub fn import_brush_image(app: &mut PhotocraftApp, name: &str, bytes: &[u8]) -> 
     app.ui.status_error = false;
     app.ui.status = format!("Imported brush {preset} from {file}");
     // Show it in the Brushes panel.
-    app.run("window.panel.activate", json!({"panel": "brushes"}))?;
+    crate::brush_panel::run_or_status(app, "window.panel.activate", json!({"panel": "brushes"}));
     Ok(r)
 }
 
