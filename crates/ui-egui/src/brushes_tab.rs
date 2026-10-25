@@ -355,17 +355,16 @@ pub(crate) fn grid_cell_width(cell: f32, scale: f32) -> f32 {
     cell * if scale.is_finite() { scale.clamp(*PREVIEW_SCALE_RANGE.start(), *PREVIEW_SCALE_RANGE.end()) } else { 1.0 }
 }
 
-/// The narrowest a list row gets at preview scale 1 before rows share the width in columns: a
-/// smaller preview makes it narrower, so more columns fit (Photoshop's list view). The standard
-/// and larger previews keep one row per line.
+/// The narrowest a row of the Columns view gets at preview scale 1 before rows share the width: a
+/// smaller preview makes it narrower, so more columns fit (Photoshop's list view).
 const LIST_ROW_W: f32 = 300.0;
 
 /// The list's columns in a list `width` points wide, `indent` past its left edge, at preview
-/// `scale`: how many [`LIST_ROW_W`]-wide rows fit side by side (one at least, and only one below
-/// a smaller preview), and the width each gets of the room past the indent.
-pub(crate) fn list_columns(width: f32, indent: f32, scale: f32) -> (f32, usize) {
+/// `scale`: with `columns` (the Columns view), how many [`LIST_ROW_W`]-wide rows fit side by side
+/// (one at least), else one; and the width each gets of the room past the indent.
+pub(crate) fn list_columns(width: f32, indent: f32, scale: f32, columns: bool) -> (f32, usize) {
     let (_, fit) = grid_columns(width, LIST_ROW_W * list_row_height(scale) / 44.0, indent, GRID_GAP);
-    let cols = if scale < 1.0 { fit } else { 1 };
+    let cols = if columns { fit } else { 1 };
     let room = if width.is_finite() { (width - indent).max(0.0) } else { 0.0 };
     (((room - GRID_GAP * (cols - 1) as f32) / cols as f32).floor(), cols)
 }
@@ -785,6 +784,8 @@ struct Draw<'a> {
     current: Option<&'a str>,
     collapsed: &'a [String],
     grid: bool,
+    /// The Columns view: list rows side by side as the width allows.
+    columns: bool,
     layout: ListLayout,
     /// The picker cards' parts — name, stroke, tip — from the gear's boxes.
     show: (bool, bool, bool),
@@ -871,9 +872,9 @@ fn draw_nodes(ui: &mut egui::Ui, d: &Draw, nodes: &[Node], depth: usize, acts: &
                 }
             });
         } else {
-            // Rows share the width in columns at small previews, in reading order; the first
-            // column keeps the folder indent inside its row, so the indent stays a drop target.
-            let (col_w, cols) = list_columns(ui.available_width(), indent, d.scale);
+            // The Columns view's rows share the width, in reading order; the first column keeps
+            // the folder indent inside its row, so the indent stays a drop target.
+            let (col_w, cols) = list_columns(ui.available_width(), indent, d.scale, d.columns);
             for line in run.chunks(cols) {
                 // Not `horizontal`: its minimum height would pad the smallest rows.
                 let size = vec2(ui.available_width(), list_row_height(d.scale));
@@ -951,6 +952,7 @@ pub fn preset_list(ui: &mut egui::Ui, presets: &[BrushPreset], current: Option<&
     rename_bar(ui, st, &mut acts);
     let filter = st.filter.trim().to_lowercase();
     let grid = st.view == BrushesView::Grid;
+    let columns = st.view == BrushesView::Columns;
     let show = (st.show_name, st.show_stroke, st.show_tip);
     let collapsed = &st.collapsed;
     egui::ScrollArea::vertical().id_salt(layout.id).max_height(layout.max_height).auto_shrink([false, !layout.fill]).show(ui, |ui| {
@@ -976,7 +978,7 @@ pub fn preset_list(ui: &mut egui::Ui, presets: &[BrushPreset], current: Option<&
             if !open {
                 continue;
             }
-            let d = Draw { label: &label, key: &key, presets, current, collapsed, grid, layout, show, scale: st.scale };
+            let d = Draw { label: &label, key: &key, presets, current, collapsed, grid, columns, layout, show, scale: st.scale };
             draw_nodes(ui, &d, &folder_tree(&items), 0, &mut acts);
             ui.add_space(2.0);
         }
@@ -1060,14 +1062,18 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, fill: bool) {
     ui.horizontal(|ui| {
         icons::paint(ui, egui::Rect::from_min_size(ui.cursor().min + vec2(0.0, 3.0), vec2(16.0, 16.0)), "search", 14.0, t.text_faint);
         ui.add_space(20.0);
-        let search_w = (inner_w - 112.0).clamp(90.0, inner_w - 40.0);
+        let search_w = (inner_w - 136.0).clamp(90.0, inner_w - 40.0);
         widgets::text_field(ui, ui.id().with("brush-search"), &mut app.ui.brushes_panel.filter, tl!("Search Brushes"), search_w, false);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let view = &mut app.ui.brushes_panel.view;
             let grid_tip = "Grid view";
             let list_tip = "List view";
+            let columns_tip = "Columns view";
             if icons::button(ui, "grid-2x2", 24.0, *view == BrushesView::Grid, tl!(grid_tip)).clicked() {
                 *view = BrushesView::Grid;
+            }
+            if icons::button(ui, "list-columns", 24.0, *view == BrushesView::Columns, tl!(columns_tip)).clicked() {
+                *view = BrushesView::Columns;
             }
             if icons::button(ui, "align-justify", 24.0, *view == BrushesView::List, tl!(list_tip)).clicked() {
                 *view = BrushesView::List;
@@ -1079,7 +1085,7 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, fill: bool) {
     ui.horizontal(|ui| {
         icons::paint(ui, egui::Rect::from_min_size(ui.cursor().min + vec2(0.0, 3.0), vec2(16.0, 16.0)), "image", 14.0, t.text_faint);
         ui.add_space(20.0);
-        let w = (inner_w - 112.0).clamp(90.0, inner_w - 40.0);
+        let w = (inner_w - 136.0).clamp(90.0, inner_w - 40.0);
         ui.allocate_ui_with_layout(vec2(w, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             let scale = &mut app.ui.brushes_panel.scale;
             let resp = widgets::slider(ui, scale, PREVIEW_SCALE_RANGE, None).on_hover_text(tl!("Preview size"));
