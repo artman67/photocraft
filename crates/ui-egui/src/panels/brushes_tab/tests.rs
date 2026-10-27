@@ -485,12 +485,12 @@ fn list_rows_keep_their_order_while_the_panel_and_previews_change() {
     }
 }
 
-/// A Brushes panel taking a tall dock: the list fills it, the footer at its bottom (the
-/// list used to stop at 640 pt and leave the rest empty).
+/// A tall Brushes panel: the list fills it, the footer at its bottom (the list used to stop at
+/// 640 pt and leave the rest empty).
 #[test]
 fn the_brushes_list_fills_a_tall_panel() {
     let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
-    app.ui.docking = Some(serde_json::from_value(json!({"floating":[],"root":{"Tabs":{"panels":["brushes"],"active":0}}})).unwrap());
+    app.run("window.panel.float", json!({"panel": "brushes", "x": 20, "y": 20, "width": 420, "height": 1340})).unwrap();
     app.ui.brushes_panel.view = BrushesView::List;
     let footer = format!("{} presets", app.session.tools.presets.len());
     let mut h = Harness::builder().with_size(vec2(1200.0, 1400.0)).build_eframe(move |cc| {
