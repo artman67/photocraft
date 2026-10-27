@@ -177,6 +177,6 @@ mod tests {
         assert_eq!(app.session.tools.current_preset.as_deref(), Some("Leaf"));
         let TipShape::Sampled(tip) = &app.session.tools.brush.tip else { panic!("sampled tip expected") };
         assert_eq!((tip.width, tip.height), (3, 8));
-        assert!(app.ui.docking.as_ref().is_some_and(|l| l.contains(&"brushes".to_string())), "the Brushes panel shows the new brush");
+        assert!(app.ui.docking.as_ref().is_some_and(|w| w.layout.contains(&"brushes".to_string())), "the Brushes panel shows the new brush");
     }
 }
