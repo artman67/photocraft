@@ -1,5 +1,10 @@
 use super::sampling::{AllLayers, sample_all_layers};
-use super::*;
+use super::{
+    BrushSettings, Document, EngineError, Footprint, IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, LayerId, PARALLEL_COPY_PIXELS,
+    PARALLEL_DAB_PIXELS, ParallelIterator, ParallelSliceMut, PixelFormat, Rect, Region, Result, Session, Smudge, Stroke, StrokePoint, Surface, ToneRange,
+    Value, alpha_index, apply_dab_stroke, bad, damage_json, dodge_burn, flag, from_rgba_into, has_pixel_layer, json, local_blur, local_sharpen, num,
+    parse_brush, run_stroke, sponge, string, to_rgba,
+};
 
 // ---------------------------------------------------------------------------------------------
 // Toning (Dodge / Burn / Sponge) and focus (Blur / Sharpen), Smudge
@@ -150,7 +155,7 @@ fn tone_range(p: &Value, cmd: &str) -> Result<ToneRange> {
 /// A sequential-dab tool's settings (Dodge, Burn, Sponge, Blur, Sharpen, Smudge), parsed once and
 /// turned into its per-dab effect, for the commit and the live preview alike.
 #[derive(Clone, Debug, PartialEq)]
-enum DabTool {
+pub(super) enum DabTool {
     Tone { burn: bool, range: ToneRange, exposure: f32, protect: bool },
     Sponge { saturate: bool, vibrance: bool },
     Focus { sharpen: bool, strength: f32, protect: bool, sigma: f32 },
@@ -193,7 +198,7 @@ impl DabNeighborhood {
 
 impl DabTool {
     /// The tool for `cmd` and its history label.
-    fn parse(s: &Session, cmd: &str, p: &Value, stroke: &Stroke) -> Result<(Self, &'static str)> {
+    pub(super) fn parse(s: &Session, cmd: &str, p: &Value, stroke: &Stroke) -> Result<(Self, &'static str)> {
         Ok(match cmd {
             "paint.dodge" | "paint.burn" => {
                 let burn = cmd == "paint.burn";
@@ -241,7 +246,7 @@ impl DabTool {
     }
 
     /// The per-dab effect on a working copy in `fmt`, for a brush of `spacing`.
-    fn effect(&self, fmt: PixelFormat, spacing: f32) -> DabEffect {
+    pub(super) fn effect(&self, fmt: PixelFormat, spacing: f32) -> DabEffect {
         let sp = spacing;
         match self.clone() {
             Self::Tone { burn, range, exposure, protect } => tone_stroke(fmt, move |c| dodge_burn(c, exposure, range, burn, protect)),
@@ -436,11 +441,11 @@ pub struct LiveDab {
     /// The active document with the stroke so far.
     pub doc: std::sync::Arc<Document>,
     cmd: String,
-    /// The stroke's dabs as points arrive, as `apply_dab_stroke` generates them. Each dab's
-    /// footprint is rasterised where it runs; a `StrokeRenderer` would also accumulate the
-    /// whole stroke's coverage, which nothing here reads.
-    generator: photocraft_paint::dynamics::DabGenerator,
     ctx: photocraft_paint::BrushContext,
+    generator: photocraft_paint::dynamics::DabGenerator,
+    /// Only the current batch is retained; sequential effects don't use accumulated coverage.
+    pending: Vec<photocraft_paint::Dab>,
+    dual_pending: Vec<photocraft_paint::Dab>,
     done: usize,
     effect: DabEffect,
     neighborhood: DabNeighborhood,
@@ -544,13 +549,17 @@ impl LiveDab {
         let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, id, p)?;
         let pre_surf = surf.clone();
         let effect = effect(&pre_surf);
-        // `apply_dab_stroke` generates the same dabs (`dabs`: zoom 1, no smoothing scale).
+        // Generate the same dabs as `apply_dab_stroke` (zoom 1), without a StrokeRenderer:
+        // its accumulated coverage isn't used here, and each effect rasterizes its own footprint.
+        let ctx = photocraft_paint::BrushContext::new(&stroke.brush);
         let generator = photocraft_paint::dynamics::DabGenerator::new(&stroke.brush, 1.0);
         let mut live = Self {
             doc: std::sync::Arc::new(doc),
             cmd: cmd.into(),
+            ctx,
             generator,
-            ctx: photocraft_paint::BrushContext::new(&stroke.brush),
+            pending: Vec::new(),
+            dual_pending: Vec::new(),
             done: 0,
             effect,
             neighborhood,
@@ -584,9 +593,13 @@ impl LiveDab {
         self.bounds
     }
 
-    /// Run the stroke's next dabs `new` on the working copy; returns the rectangle they changed.
-    fn run_dabs(&mut self, new: &[photocraft_paint::Dab]) -> Rect {
+    /// Run this batch's primary dabs in order, rasterizing each footprint exactly once.
+    fn run_new_dabs(&mut self) -> Rect {
         let ctx = &self.ctx;
+        let mut new = std::mem::take(&mut self.pending);
+        // As in `apply_dab_stroke`, sequential effects consume only primary footprints. Keep
+        // generating dual dabs so the generator's state advances just as it did in StrokeRenderer.
+        self.dual_pending.clear();
         let mut dmg = Rect::EMPTY;
         for (k, d) in new.iter().enumerate() {
             let r = ctx.dab_rect(d, false);
@@ -594,11 +607,13 @@ impl LiveDab {
                 continue;
             }
             let mut region = self.work.read(&self.pre_surf, self.neighborhood.read_rect(r, d));
-            (self.effect)(&mut region, &ctx.footprint(d, self.done + k));
+            (self.effect)(&mut region, &ctx.footprint(d, self.done.saturating_add(k)));
             self.work.write(&self.pre_surf, &region, r);
             dmg = dmg.union(&r);
         }
-        self.done += new.len();
+        self.done = self.done.saturating_add(new.len());
+        new.clear();
+        self.pending = new;
         dmg
     }
 
@@ -616,20 +631,20 @@ impl LiveDab {
         crate::brush_cmds::check_coords(pts, &self.cmd)?;
         let pts: Vec<_> = pts.iter().map(|q| StrokePoint::new(q.x, q.y, q.pressure)).collect();
         self.points.extend_from_slice(&pts);
-        let (mut new, mut dual) = (Vec::new(), Vec::new());
-        self.generator.push(&pts, &mut new, &mut dual);
-        let dmg = self.run_dabs(&new);
+        self.generator.push(&pts, &mut self.pending, &mut self.dual_pending);
+        let dmg = self.run_new_dabs();
         let ctx = &self.ctx;
         // The finishing dabs, run on a scratch copy of the working pixels.
         let mut tail = None;
         if self.preview_tail {
+            let mut generator = self.generator.clone();
             let (mut ds, mut dual) = (Vec::new(), Vec::new());
-            self.generator.clone().finish(&mut ds, &mut dual);
+            generator.finish(&mut ds, &mut dual);
             let r = ds.iter().fold(Rect::EMPTY, |a, d| a.union(&ctx.dab_rect(d, false)));
             if !r.is_empty() {
                 let mut region = self.work.read(&self.pre_surf, r.inflate(self.neighborhood.halo()));
                 for (k, d) in ds.iter().enumerate() {
-                    (self.effect)(&mut region, &ctx.footprint(d, self.done + k));
+                    (self.effect)(&mut region, &ctx.footprint(d, self.done.saturating_add(k)));
                 }
                 tail = Some((r, region.crop(r)));
             }
@@ -666,9 +681,8 @@ impl LiveDab {
         if now != tool || stroke.brush != *brush || id != self.id {
             return Err(bad(&self.cmd, "the brush, tool options or layer changed during the stroke"));
         }
-        let (mut tail, mut dual) = (Vec::new(), Vec::new());
-        self.generator.finish(&mut tail, &mut dual);
-        let dmg = self.run_dabs(&tail);
+        self.generator.finish(&mut self.pending, &mut self.dual_pending);
+        let dmg = self.run_new_dabs();
         let shown = dmg.union(&self.tail);
         if !shown.is_empty() {
             let work = self.work.read(&self.pre_surf, shown);
